@@ -17,3 +17,6 @@ plugins/*
 
 !plugins/Diagnostics/
 !plugins/Log/
+
+deploy
+exclude.deploy
