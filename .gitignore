@@ -29,3 +29,7 @@ vendor/*
 npm-debug.log
 
 Lychee-v*
+
+# Louis: deploy scripts
+deploy
+exclude.deploy
