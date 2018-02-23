@@ -1068,29 +1068,7 @@ final class Photo {
 		}
 
 		// Read EXIF
-		if ($info['mime']=='image/jpeg') {
-			$exif = false;
-			if(Settings::useExiftool()) {
-				Log::notice(Database::get(), __METHOD__, __LINE__, 'Using exiftool');
-				$exiftool = '';
-				$handle = @popen("exiftool -php -q $url 2>&1", 'r');
-				while (!feof($handle)) {
-					$exiftool .= @fread($handle, 8192);
-				}
-				@pclose($handle);
-				if (false!==$exiftool && strlen($exiftool) > 0) {
-					$exiftool = @eval('return ' . "$exiftool");
-					if (is_array($exiftool) && is_array($exiftool[0])) {
-						$exif = $exiftool[0];
-					}
-				}
-			}
-			// If exiftool is not available
-			// or using exiftool fails in any way fallback to exif_read_data
-			if (!is_array($exif)) {
-				$exif = @exif_read_data($url, 'EXIF', false, false);
-			}
-		}
+		if ($info['mime']=='image/jpeg') $exif = @exif_read_data($url, 'EXIF, IFD0', false, false);
 		else $exif = false;
 
 		// EXIF Metadata
