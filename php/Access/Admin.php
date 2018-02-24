@@ -28,6 +28,7 @@ final class Admin extends Access {
 			case 'Album::setDescription':   self::setAlbumDescriptionAction(); break;
 			case 'Album::setLicense':		self::setAlbumLicenseAction(); break;
 			case 'Album::setPublic':        self::setAlbumPublicAction(); break;
+			case 'Album::setPosition':      self::setPositionAction(); break;
 			case 'Album::delete':           self::deleteAlbumAction(); break;
 			case 'Album::merge':            self::mergeAlbumsAction(); break;
 
@@ -128,11 +129,13 @@ final class Admin extends Access {
 
 	}
 
-	private static function setAlbumLicenseAction() {
-		Validator::required(isset($_POST['albumID'], $_POST['license']), __METHOD__);
+	private static function setPositionAction() {
+
+		Validator::required(isset($_POST['albumID'],$_POST['photoOrder']), __METHOD__);
 
 		$album = new Album($_POST['albumID']);
-		Response::json($album->setLicense($_POST['license']));
+		Response::json($album->setPosition());
+
 	}
 
 	private static function setAlbumPublicAction() {
