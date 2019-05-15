@@ -3,7 +3,7 @@
 	<head>
 
 		<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
-		<title>Louis-Olivier Brassard – Albums virtuels</title>
+		<title>Louis-Olivier Brassard / Albums web</title>
 
 		<meta name="author" content="Tobias Reich">
 
