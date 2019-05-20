@@ -16,8 +16,16 @@ use Lychee\Access\Installation;
 use Lychee\Access\Admin;
 use Lychee\Access\Guest;
 
+// error_reporting(E_ALL);
+// ini_set('display_errors', 'On');
+
 require(__DIR__ . '/define.php');
 require(__DIR__ . '/autoload.php');
+if (file_exists(__DIR__ . '/../vendor/autoload.php' ))
+{
+    include(__DIR__ . '/../vendor/autoload.php');
+    define('VIDEO_THUMB', True);
+}
 
 require(__DIR__ . '/helpers/fastImageCopyResampled.php');
 require(__DIR__ . '/helpers/generateID.php');
@@ -27,6 +35,7 @@ require(__DIR__ . '/helpers/getGraphHeader.php');
 require(__DIR__ . '/helpers/getHashedString.php');
 require(__DIR__ . '/helpers/hasPermissions.php');
 require(__DIR__ . '/helpers/search.php');
+require(__DIR__ . '/helpers/gcd.php');
 
 // Define the called function
 if (isset($_POST['function']))     $fn = $_POST['function'];
@@ -36,8 +45,11 @@ else                               $fn = null;
 // Check if a function has been specified
 if (!empty($fn)) {
 
-	// Start the session and set the default timezone
-	session_start();
+	// session_name('lychee');
+    // Start the session and set the default timezone
+    if (session_status() == PHP_SESSION_NONE) {
+        session_start();
+    }
 	date_default_timezone_set('UTC');
 
 	// Validate parameters
@@ -88,5 +100,3 @@ if (!empty($fn)) {
 	Response::error('No API function specified!');
 
 }
-
-?>

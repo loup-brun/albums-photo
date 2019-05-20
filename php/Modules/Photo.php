@@ -2,9 +2,11 @@
 
 namespace Lychee\Modules;
 
+use Exception;
 use ZipArchive;
 use Imagick;
 use ImagickPixel;
+use FFMpeg;
 
 final class Photo {
 
@@ -16,11 +18,22 @@ final class Photo {
 		IMAGETYPE_PNG
 	);
 
+	public static $validVideoTypes = array(
+		"video/mp4",
+		"video/ogg",
+		"video/webm",
+		"video/quicktime"
+    );
+
 	public static $validExtensions = array(
 		'.jpg',
 		'.jpeg',
 		'.png',
-		'.gif'
+		'.gif',
+		'.ogv',
+		'.mp4',
+		'.webm',
+		'.mov'
 	);
 
 	/**
@@ -36,7 +49,7 @@ final class Photo {
 	}
 
 	/**
-	 * Creats new photo(s).
+	 * Creates new photo(s).
 	 * Exits on error.
 	 * Use $returnOnError if you want to handle errors by your own.
 	 * @return string|false ID of the added photo.
@@ -131,13 +144,22 @@ final class Photo {
 			Response::error('Photo format not supported!');
 		}
 
-		// Verify image
-		$type = @exif_imagetype($file['tmp_name']);
-		if (!in_array($type, self::$validTypes, true)) {
-			Log::error(Database::get(), __METHOD__, __LINE__, 'Photo type not supported');
-			if ($returnOnError===true) return false;
-			Response::error('Photo type not supported!');
-		}
+		// Verify video
+        if(!in_array($file['type'], self::$validVideoTypes, true)){
+			if (!function_exists("exif_imagetype")) {
+		      Log::error(Database::get(), __METHOD__, __LINE__, 'EXIF library not loaded. Make sure exif is enabled in php.ini');
+		      if ($returnOnError===true) return false;
+					Response::error('EXIF library not loaded on the server!');
+		    }
+
+			// Verify image
+            $type = @exif_imagetype($file['tmp_name']);
+            if (!in_array($type, self::$validTypes, true)) {
+                Log::error(Database::get(), __METHOD__, __LINE__, 'Photo type not supported');
+                if ($returnOnError===true) return false;
+                Response::error('Photo type not supported! '.$file['type']);
+            }
+        }
 
 		// Generate id
 		$id = generateID();
@@ -170,6 +192,7 @@ final class Photo {
 				$path       = $exists['path'];
 				$path_thumb = $exists['path_thumb'];
 				$medium     = ($exists['medium']==='1' ? 1 : 0);
+				$small      = ($exists['small']==='1' ? 1 : 0);
 				$exists     = true;
 			}
 
@@ -183,7 +206,7 @@ final class Photo {
 					Log::error(Database::get(), __METHOD__, __LINE__, 'Could not copy photo to uploads');
 					if ($returnOnError===true) return false;
 					Response::error('Could not copy photo to uploads!');
-				} else @unlink($tmp_name);
+				} elseif (Settings::get()['deleteImported']==='1') @unlink($tmp_name);
 			} else {
 				if (!@move_uploaded_file($tmp_name, $path)) {
 					Log::error(Database::get(), __METHOD__, __LINE__, 'Could not move photo to uploads');
@@ -223,29 +246,62 @@ final class Photo {
 			if ($info['takestamp']!==''&&$info['takestamp']!==0) @touch($path, $info['takestamp']);
 
 			// Create Thumb
-			if (!$this->createThumb($path, $photo_name, $info['type'], $info['width'], $info['height'])) {
-				Log::error(Database::get(), __METHOD__, __LINE__, 'Could not create thumbnail for photo');
-				if ($returnOnError===true) return false;
-				Response::error('Could not create thumbnail for photo!');
+            if(!in_array($file['type'], self::$validVideoTypes, true)){
+				if (!$this->createThumb($path, $photo_name, $info['type'], $info['width'], $info['height'])){
+					Log::error(Database::get(), __METHOD__, __LINE__, 'Could not create thumbnail for photo');
+					if ($returnOnError===true) return false;
+					Response::error($file['type'].' Could not create thumbnail for photo!');
+				}
+
+				// Set thumb url
+				$path_thumb = md5($id) . '.jpeg';
+			}
+			elseif(!defined('VIDEO_THUMB'))
+			{
+				Log::notice(Database::get(), __METHOD__, __LINE__, 'Could not create thumbnail for video because FFMPEG is not available.');
+				// Set thumb url
+				$path_thumb = '';
+			}
+			else
+			{
+				if (!$this->createVideoThumb($path, $id)){
+						Log::error(Database::get(), __METHOD__, __LINE__, 'Could not create thumbnail for video');
+						if ($returnOnError===true) return false;
+						Response::error($file['type'].' Could not create thumbnail for video!');
+				}
+
+				// Set thumb url
+				$path_thumb = md5($id) . '.jpeg';
 			}
 
 			// Create Medium
-			if ($this->createMedium($path, $photo_name, $info['width'], $info['height'])) $medium = 1;
+			if (Photo::createMedium($path, $photo_name, $info['type'], $info['width'], $info['height'], Settings::get()['medium_max_width'], Settings::get()['medium_max_height'])) $medium = 1;
 			else $medium = 0;
-
-			// Set thumb url
-			$path_thumb = md5($id) . '.jpeg';
-
+			// Create Small
+			if (Photo::createMedium($path, $photo_name, $info['type'], $info['width'], $info['height'], Settings::get()['small_max_width'], Settings::get()['small_max_height'], 'SMALL')) $small = 1;
+			else $small = 0;
 		}
 
-		$values = array(LYCHEE_TABLE_PHOTOS, $id, $info['title'], $photo_name, $info['description'], $info['tags'], $info['type'], $info['width'], $info['height'], $info['size'], $info['iso'], $info['aperture'], $info['make'], $info['model'], $info['shutter'], $info['focal'], $info['takestamp'], $path_thumb, $albumID, $public, $star, $checksum, $medium);
-		$query  = Database::prepare(Database::get(), "INSERT INTO ? (id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, shutter, focal, takestamp, thumbUrl, album, public, star, checksum, medium) VALUES ('?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?')", $values);
-		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+		if(!in_array($file['type'], self::$validVideoTypes, true)){
+			$values = array(LYCHEE_TABLE_PHOTOS, $id, $info['title'], $photo_name, $info['description'], $info['tags'], $info['type'], $info['width'], $info['height'], $info['size'], $info['iso'],
+			$info['aperture'], $info['make'], $info['model'], $info['lens'], $info['shutter'], $info['focal'], $info['takestamp'], $path_thumb, $albumID, $public, $star, $checksum, $medium, $small, 'none');
+			$query  = Database::prepare(Database::get(), "INSERT INTO ? (id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, lens, shutter, focal, takestamp, thumbUrl, album, public, star, checksum, medium, small, license) VALUES ('?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?')", $values);
+			$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+		} else {
+            $values = array(LYCHEE_TABLE_PHOTOS, $id, $info['title'], $photo_name, $file['type'], $info['size'], time(),  $path_thumb, $albumID, $public, $star, $checksum, $medium, $small, 'none');
+            $query  = Database::prepare(Database::get(), "INSERT INTO ? (id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, lens, shutter, focal, takestamp, thumbUrl, album, public, star, checksum, medium, small, license) VALUES ('?', '?', '?', '', '', '?', 0, 0, '?', '', '', '', '', '', '', '', '?', '?', '?', '?', '?', '?', '?', '?', '?')", $values);
+            $result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+        }
 
 		if ($result===false) {
 			if ($returnOnError===true) return false;
 			Response::error('Could not save photo in database!');
 		}
+
+		// Update takestamp info of album
+		$values = array(LYCHEE_TABLE_ALBUMS, $info['takestamp'], $info['takestamp'], $info['takestamp'], $info['takestamp'], $albumID);
+		$query = Database::prepare(Database::get(), "UPDATE ? SET min_takestamp = CASE WHEN min_takestamp > '?' OR min_takestamp = '0' THEN '?' ELSE min_takestamp END,  max_takestamp = CASE WHEN max_takestamp < '?' THEN '?' ELSE max_takestamp END WHERE id = '?'", $values);
+		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
 
 		// Call plugins
 		Plugins::get()->activate(__METHOD__, 1, func_get_args());
@@ -260,8 +316,8 @@ final class Photo {
 	private function exists($checksum, $photoID = null) {
 
 		// Exclude $photoID from select when $photoID is set
-		if (isset($photoID)) $query = Database::prepare(Database::get(), "SELECT id, url, thumbUrl, medium FROM ? WHERE checksum = '?' AND id <> '?' LIMIT 1", array(LYCHEE_TABLE_PHOTOS, $checksum, $photoID));
-		else                 $query = Database::prepare(Database::get(), "SELECT id, url, thumbUrl, medium FROM ? WHERE checksum = '?' LIMIT 1", array(LYCHEE_TABLE_PHOTOS, $checksum));
+		if (isset($photoID)) $query = Database::prepare(Database::get(), "SELECT id, url, thumbUrl, medium, small FROM ? WHERE checksum = '?' AND id <> '?' LIMIT 1", array(LYCHEE_TABLE_PHOTOS, $checksum, $photoID));
+		else                 $query = Database::prepare(Database::get(), "SELECT id, url, thumbUrl, medium, small FROM ? WHERE checksum = '?' LIMIT 1", array(LYCHEE_TABLE_PHOTOS, $checksum));
 
 		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
 
@@ -275,7 +331,8 @@ final class Photo {
 				'photo_name' => $result->url,
 				'path'       => LYCHEE_UPLOADS_BIG . $result->url,
 				'path_thumb' => $result->thumbUrl,
-				'medium'     => $result->medium
+				'medium'     => $result->medium,
+				'small'	     => $result->small
 			);
 
 			return $return;
@@ -305,8 +362,11 @@ final class Photo {
 		$newUrl    = LYCHEE_UPLOADS_THUMB . $photoName[0] . '.jpeg';
 		$newUrl2x  = LYCHEE_UPLOADS_THUMB . $photoName[0] . '@2x.jpeg';
 
+		$error = false;
 		// Create thumbnails with Imagick
 		if(Settings::hasImagick()) {
+
+			try {
 
 			// Read image
 			$thumb = new Imagick();
@@ -322,17 +382,36 @@ final class Photo {
 
 			// Create 1st version
 			$thumb->cropThumbnailImage($newWidth, $newHeight);
-			$thumb->writeImage($newUrl);
+			// Save image
+			try { $thumb->writeImage($newUrl); }
+			catch (ImagickException $err) {
+				Log::notice(Database::get(), __METHOD__, __LINE__, 'Could not save '.$url.' (' . $err->getMessage() . ')');
+				$error = true;
+			}
 			$thumb->clear();
 			$thumb->destroy();
 
 			// Create 2nd version
 			$thumb2x->cropThumbnailImage($newWidth*2, $newHeight*2);
-			$thumb2x->writeImage($newUrl2x);
+			// Save image
+			try { $thumb2x->writeImage($newUrl2x); }
+			catch (ImagickException $err) {
+				Log::notice(Database::get(), __METHOD__, __LINE__, 'Could not save '.$url.' (' . $err->getMessage() . ')');
+				$error = true;
+			}
 			$thumb2x->clear();
 			$thumb2x->destroy();
+			}
+			catch (ImagickException $exception) {
+				Logs::error(__METHOD__,__LINE__,$exception->getMessage());
+				$error = true;
+	        }
+		}
+		else {
+			$error = true;
+		}
 
-		} else {
+		if($error) {
 
 			// Create image
 			$thumb   = imagecreatetruecolor($newWidth, $newHeight);
@@ -382,11 +461,42 @@ final class Photo {
 	}
 
 	/**
-	 * Creates a smaller version of a photo when its size is bigger than a preset size.
-	 * Photo must be big enough and Imagick must be installed and activated.
 	 * @return boolean Returns true when successful.
 	 */
-	private function createMedium($url, $filename, $width, $height) {
+	private function createVideoThumb($path, $id) {
+		try{
+			$ffprobe = FFMpeg\FFProbe::create();
+			$ffmpeg = FFMpeg\FFMpeg::create();
+			$duration = $ffprobe
+				->format($path) // extracts file information
+				->get('duration');
+			$dimension = new FFMpeg\Coordinate\Dimension(200, 200);
+			$video = $ffmpeg->open($path);
+			$video->filters()->resize($dimension)->synchronize();
+			$frame = $video->frame(FFMpeg\Coordinate\TimeCode::fromSeconds($duration/2));
+			$frame->save(sys_get_temp_dir() . '/'. md5($id) . '.jpeg');
+			$info = $this->getInfo(sys_get_temp_dir() . '/'. md5($id) . '.jpeg');
+			if (!$this->createThumb(sys_get_temp_dir() . '/'. md5($id) . '.jpeg', md5($id) . '.jpeg', $info['type'], $info['width'], $info['height'])){
+				Log::error(Database::get(), __METHOD__, __LINE__, 'Could not create thumbnail for video');
+			}
+			return true;
+		}
+		catch (Exception $exception) {
+			return false;
+		}
+	}
+
+	/**
+	 * Creates a smaller version of a photo when its size is bigger than a preset size.
+	 * Photo must be big enough and Imagick must be installed and activated.
+	 *
+	 * Size of the medium-photo
+	 * When changing these values,
+	 * also change the size detection in the front-end
+	 *
+	 * @return boolean Returns true when successful.
+	 */
+	public static function createMedium($url, $filename, $type, $width, $height, $newWidth  = 1920, $newHeight = 1080, $kind = 'MEDIUM') {
 
 		// Excepts the following:
 		// (string) $url = Path to the photo-file
@@ -403,54 +513,110 @@ final class Photo {
 		// Set to true when creation of medium-photo failed
 		$error = false;
 
-		// Size of the medium-photo
-		// When changing these values,
-		// also change the size detection in the front-end
-		$newWidth  = 1920;
-		$newHeight = 1080;
 
 		// Check permissions
-		if (hasPermissions(LYCHEE_UPLOADS_MEDIUM)===false) {
+		if ($kind == 'MEDIUM' && hasPermissions(LYCHEE_UPLOADS_MEDIUM)===false) {
 
 			// Permissions are missing
 			Log::notice(Database::get(), __METHOD__, __LINE__, 'Skipped creation of medium-photo, because uploads/medium/ is missing or not readable and writable.');
-			$error = true;
+			return false;
+
+		}
+		if ($kind == 'SMALL' && hasPermissions(LYCHEE_UPLOADS_SMALL)===false) {
+
+			// Permissions are missing
+			Log::notice(Database::get(), __METHOD__, __LINE__, 'Skipped creation of small-photo, because uploads/small/ is missing or not readable and writable.');
+			return false;
 
 		}
 
 		// Is photo big enough?
-		// Is Imagick installed and activated?
-		if (($error===false)&&
-			($width>$newWidth||$height>$newHeight)&&
-			(extension_loaded('imagick')&&Settings::get()['imagick']==='1')) {
+	    if ($width <= $newWidth && $height <= $newHeight)
+	    {
+            Log::notice(Database::get(), __METHOD__, __LINE__, 'No resize (image is too small)!');
+		    return false;
+	    }
 
+		$newUrl = '';
+		if($kind == 'SMALL')
+		{
+			$newUrl = LYCHEE_UPLOADS_SMALL . $filename;
+		}
+		else
+		{
 			$newUrl = LYCHEE_UPLOADS_MEDIUM . $filename;
+		}
 
-			// Read image
-			$medium = new Imagick();
-			$medium->readImage($url);
+		// Is Imagick installed and activated?
+		if (Settings::hasImagick()) {
 
-			// Adjust image
-			$medium->scaleImage($newWidth, $newHeight, true);
-			$medium->stripImage();
-			$medium->setImageCompressionQuality($quality);
+			try {
+				// Read image
+				$medium = new Imagick();
+				$medium->readImage($url);
 
-			// Save image
-			try { $medium->writeImage($newUrl); }
-			catch (ImagickException $err) {
-				Log::notice(Database::get(), __METHOD__, __LINE__, 'Could not save medium-photo (' . $err->getMessage() . ')');
-				$error = true;
+				// Adjust image
+				$medium->scaleImage($newWidth, $newHeight, ($newWidth != 0));
+				$medium->stripImage();
+				$medium->setImageCompressionQuality($quality);
+
+				// Save image
+				try { $medium->writeImage($newUrl); }
+				catch (ImagickException $err) {
+					Log::notice(Database::get(), __METHOD__, __LINE__, 'Could not save '.$kind.'-photo (' . $err->getMessage() . ')');
+					$error = true;
+				}
+
+				$medium->clear();
+				$medium->destroy();
 			}
+			catch (ImagickException $exception) {
+				Log::error(Database::get(), __METHOD__,__LINE__,$exception->getMessage());
+				$error = true;
+	        }
 
-			$medium->clear();
-			$medium->destroy();
+		}
 
-		} else {
+		if($error || !Settings::hasImagick())
+		{
+			Log::notice(Database::get(), __METHOD__, __LINE__, 'Picture is big enough for resize, try with GD!');
+			// failed with imagick, try with GD
 
-			// Photo too small or
-			// Medium is deactivated or
-			// Imagick not installed
-			$error = true;
+			// Create image
+	        if($newWidth == 0)
+	        {
+		        $newWidth = $newHeight*($width/$height);
+	        }
+	        else
+	        {
+		        $tmpHeight = $newWidth/($width/$height);
+				if($newHeight != 0 && $tmpHeight > $newHeight)
+				{
+					$newWidth = $newHeight*($width/$height);
+				}
+				else
+				{
+					$newHeight = $tmpHeight;
+				}
+	        }
+	        $medium   = imagecreatetruecolor($newWidth, $newHeight);
+	        // Create new image
+	        switch($type) {
+		        case 'image/jpeg': $sourceImg = imagecreatefromjpeg($url); break;
+		        case 'image/png':  $sourceImg = imagecreatefrompng($url); break;
+		        case 'image/gif':  $sourceImg = imagecreatefromgif($url); break;
+		        default:           Log::error(Database::get(), __METHOD__, __LINE__, 'Type of photo is not supported');
+			        return false;
+			        break;
+	        }
+	        // Create retina thumb
+	        imagecopyresampled($medium, $sourceImg, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
+	        imagejpeg($medium, $newUrl, $quality);
+	        imagedestroy($medium);
+	        // Free memory
+	        imagedestroy($sourceImg);
+
+	        $error = false;
 
 		}
 
@@ -632,45 +798,111 @@ final class Photo {
 	}
 
 	/**
-	 * Rurns photo-attributes into a front-end friendly format. Note that some attributes remain unchanged.
+	 * Returns photo-attributes into a front-end friendly format. Note that some attributes remain unchanged.
 	 * @return array Returns photo-attributes in a normalized structure.
 	 */
 	public static function prepareData(array $data) {
 
-		// Excepts the following:
-		// (array) $data = ['id', 'title', 'tags', 'public', 'star', 'album', 'thumbUrl', 'takestamp', 'url', 'medium']
+		// Expects the following:
+		// (array) $data = ['id', 'title', ...]
 
 		// Init
 		$photo = null;
 
 		// Set unchanged attributes
-		$photo['id']     = $data['id'];
-		$photo['title']  = $data['title'];
-		$photo['tags']   = $data['tags'];
-		$photo['public'] = $data['public'];
-		$photo['star']   = $data['star'];
-		$photo['album']  = $data['album'];
+		$photo['id']     		= $data['id'];
+		$photo['title']  		= $data['title'];
+		$photo['description']  	= isset($data['description']) ? $data['description'] : '';
+		$photo['tags']   		= $data['tags'];
+		$photo['public'] 		= $data['public'];
+		$photo['star']   		= $data['star'];
+		$photo['album']  		= $data['album'];
+		$photo['size']  		= $data['size'];
+		$photo['type']   		= $data['type'];
+		$photo['width']  		= $data['width'];
+		$photo['height'] 		= $data['height'];
+		$photo['shutter'] 		= isset($data['shutter']) ? $data['shutter'] : '';
+		$photo['make'] 			= isset($data['make']) ? $data['make'] : '';
+		$photo['model']			= isset($data['model']) ? $data['model'] : '';
+		$photo['iso'] 			= isset($data['iso']) ? $data['iso'] : '';
+		$photo['aperture'] 		= isset($data['aperture']) ? $data['aperture'] : '';
+		$photo['focal'] 		= isset($data['focal']) ? $data['focal'] : '';
+		$photo['lens']   		= isset($data['lens']) ? $data['lens'] : ''; // isset should not be needed
+
+
+		if($photo['shutter'] != '' && substr($photo['shutter'], 0,2) != '1/') {
+
+			preg_match('/(\d+)\/(\d+) s/', $photo['shutter'], $matches);
+			if ($matches) {
+				$a = intval($matches[1]);
+				$b = intval($matches[2]);
+				$gcd = gcd($a,$b);
+				$a = $a / $gcd;
+				$b = $b / $gcd;
+				if ($a == 1)
+				{
+					$photo['shutter'] = '1/'. $b . ' s';
+				}
+				else
+				{
+					$photo['shutter'] = ($a / $b) . ' s';
+				}
+			}
+		}
+		if ($photo['shutter'] == '1/1 s')
+	    {
+		    $photo['shutter'] = '1 s';
+	    }
+
+		$photo['license'] = Settings::get()['default_license'];
+		if (isset($data['license']))
+		{
+			if($data['license'] != '' && $data['license'] != 'none')
+			{
+				$photo['license'] = $data['license'];
+			}
+			else if($data['album'] != '0')
+			{
+				$query  = Database::prepare(Database::get(), "SELECT license FROM ? WHERE id = '?' LIMIT 1", array(LYCHEE_TABLE_ALBUMS, $data['album']));
+				$albums = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+
+				if ($albums===false) return false;
+
+				// Get photo object
+				$album = $albums->fetch_assoc();
+				if($album['license'] != '' && $album['license'] != 'none')
+				{
+					$photo['license'] = $album['license'];
+				}
+			}
+		}
 
 		// Parse medium
 		if ($data['medium']==='1') $photo['medium'] = LYCHEE_URL_UPLOADS_MEDIUM . $data['url'];
 		else                       $photo['medium'] = '';
+
+		// Parse small
+		if ($data['small']==='1') $photo['small'] = LYCHEE_URL_UPLOADS_SMALL . $data['url'];
+		else                       $photo['small'] = '';
 
 		// Parse paths
 		$photo['thumbUrl'] = LYCHEE_URL_UPLOADS_THUMB . $data['thumbUrl'];
 		$photo['url']      = LYCHEE_URL_UPLOADS_BIG . $data['url'];
 
 		// Use takestamp as sysdate when possible
-		if (isset($data['takestamp'])&&$data['takestamp']!=='0') {
+		if (isset($data['takestamp']) && $data['takestamp'] > 0) {
 
 			// Use takestamp
 			$photo['cameraDate'] = '1';
-			$photo['sysdate']    = strftime('%d %B %Y', $data['takestamp']);
+			$photo['sysdate']    = strftime('%d %B %Y', substr($data['id'], 0, -4));
+			$photo['takedate']    = strftime('%d %B %Y - %H:%M', $data['takestamp']);
 
 		} else {
 
 			// Use sysstamp from the id
 			$photo['cameraDate'] = '0';
 			$photo['sysdate']    = strftime('%d %B %Y', substr($data['id'], 0, -4));
+			$photo['takedate']   = '';
 
 		}
 
@@ -707,17 +939,19 @@ final class Photo {
 			return false;
 		}
 
+		$photo = Photo::prepareData($photo);
+
 		// Parse photo
 		$photo['sysdate'] = strftime('%d %b. %Y', substr($photo['id'], 0, -4));
 		if (strlen($photo['takestamp'])>1) $photo['takedate'] = strftime('%d %b. %Y %T', $photo['takestamp']);
 
 		// Parse medium
-		if ($photo['medium']==='1') $photo['medium'] = LYCHEE_URL_UPLOADS_MEDIUM . $photo['url'];
-		else                        $photo['medium'] = '';
+		// if ($photo['medium']==='1') $photo['medium'] = LYCHEE_URL_UPLOADS_MEDIUM . $photo['url'];
+		// else                        $photo['medium'] = '';
 
 		// Parse paths
-		$photo['url']      = LYCHEE_URL_UPLOADS_BIG . $photo['url'];
-		$photo['thumbUrl'] = LYCHEE_URL_UPLOADS_THUMB . $photo['thumbUrl'];
+		// $photo['url']      = LYCHEE_URL_UPLOADS_BIG . $photo['url'];
+		// $photo['thumbUrl'] = LYCHEE_URL_UPLOADS_THUMB . $photo['thumbUrl'];
 
 		if ($albumID!='false') {
 
@@ -734,8 +968,8 @@ final class Photo {
 				// Get album object
 				$album = $albums->fetch_assoc();
 
-				// Photo not found?
-				if ($photo===null) {
+				// Album not found?
+				if ($album===null) {
 					Log::error(Database::get(), __METHOD__, __LINE__, 'Could not find specified album');
 					return false;
 				}
@@ -795,6 +1029,7 @@ final class Photo {
 		$return['latitude']    = '';
 		$return['longitude']   = '';
 		$return['altitude']    = '';
+		$return['license']		 = '';
 
 		// Size
 		$size = filesize($url)/1024;
@@ -844,9 +1079,11 @@ final class Photo {
 
 			// ISO
 			if (!empty($exif['ISOSpeedRatings'])) $return['iso'] = $exif['ISOSpeedRatings'];
+			else if (!empty($exif['ISO'])) $return['iso'] = trim($exif['ISO']);
 
 			// Aperture
 			if (!empty($exif['COMPUTED']['ApertureFNumber'])) $return['aperture'] = $exif['COMPUTED']['ApertureFNumber'];
+			else if (!empty($exif['Aperture'])) $return['aperture'] = 'f/' . trim($exif['Aperture']);
 
 			// Make
 			if (!empty($exif['Make'])) $return['make'] = trim($exif['Make']);
@@ -864,21 +1101,40 @@ final class Photo {
 					$temp = $temp[0] / $temp[1];
 					$temp = round($temp, 1);
 					$return['focal'] = $temp . ' mm';
+				} else if (strpos($exif['FocalLength'], 'mm')!==false) {
+					$temp = substr($exif['FocalLength'], 0, strpos($exif['FocalLength'], '.'));
+					$return['focal'] = $temp . ' mm';
 				} else {
 					$return['focal'] = $exif['FocalLength'] . ' mm';
 				}
 			}
 
 			// Takestamp
-			if (!empty($exif['DateTimeOriginal'])) $return['takestamp'] = strtotime($exif['DateTimeOriginal']);
+			if (!empty($exif['DateTimeOriginal']))
+            {
+				$return['takestamp'] = strtotime($exif['DateTimeOriginal']);
+            }
+			if ($return['takestamp'] > 2147483647 || $return['takestamp'] < -2147483647) {
+                Log::notice(Database::get(), __METHOD__, __LINE__, 'takestamp = '.$info['takestamp'].' = '.$exif['DateTimeOriginal'].' -- is out of range, fixing it to 0.');
+                $return['takestamp'] = 0;
+            }
+
+			if (!empty($exif['LensID'])) $return['lens'] = trim($exif['LensID']);
+			else if (!empty($exif['LensSpec'])) $return['lens'] = trim($exif['LensSpec']);
+			else if (!empty($exif['Lens'])) $return['lens'] = trim($exif['Lens']);
+			else if (!empty($exif['LensInfo'])) $return['lens'] = trim($exif['LensInfo']);
 
 			// Lens field from Lightroom
-			if (!empty($exif['UndefinedTag:0xA434'])) $return['lens'] = trim($exif['UndefinedTag:0xA434']);
+			if ($return['lens'] == '' && !empty($exif['UndefinedTag:0xA434'])) $return['lens'] = trim($exif['UndefinedTag:0xA434']);
 
 			// Deal with GPS coordinates
 			if (!empty($exif['GPSLatitude']) && !empty($exif['GPSLatitudeRef'])) $return['latitude'] = getGPSCoordinate($exif['GPSLatitude'], $exif['GPSLatitudeRef']);
 			if (!empty($exif['GPSLongitude']) && !empty($exif['GPSLongitudeRef'])) $return['longitude'] = getGPSCoordinate($exif['GPSLongitude'], $exif['GPSLongitudeRef']);
 
+			// Check data is a valid string
+			foreach ($return as $k => $v) {
+				if (!mb_check_encoding($v)) $return[$k] = '';
+			}
 		}
 
 		// Call plugins
@@ -892,10 +1148,11 @@ final class Photo {
 	 * Starts a download of a photo.
 	 * @return resource|boolean Sends a ZIP-file or returns false on failure.
 	 */
-	public function getArchive() {
+	public function getArchive($kind) {
 
 		// Check dependencies
 		Validator::required(isset($this->photoIDs), __METHOD__);
+		Validator::required(isset($kind), __METHOD__);
 
 		// Call plugins
 		Plugins::get()->activate(__METHOD__, 0, func_get_args());
@@ -934,19 +1191,37 @@ final class Photo {
 		// Escape title
 		$photo->title = str_replace($badChars, '', $photo->title);
 
+		// determine the file based on given size
+		switch ($kind) {
+			case 'MEDIUM':
+				$filepath = LYCHEE_UPLOADS_MEDIUM;
+				break;
+			case 'SMALL':
+				$filepath = LYCHEE_UPLOADS_SMALL;
+				break;
+			default:
+				$filepath = LYCHEE_UPLOADS_BIG;
+		}
+
+		$fullfilepath = $filepath . $photo->url;
+		// Check the file actually exists
+		if (!file_exists($fullfilepath)) {
+			Log::error(Database::get(), __METHOD__, __LINE__, 'File is missing: ' .$fullfilepath);
+			return false;
+		}
+
 		// Set headers
 		header("Content-Type: application/octet-stream");
-		header("Content-Disposition: attachment; filename=\"" . $photo->title . $extension . "\"");
-		header("Content-Length: " . filesize(LYCHEE_UPLOADS_BIG . $photo->url));
+		header("Content-Disposition: attachment; filename=\"" . $photo->title . '_' . $kind . $extension . "\"");
+		header("Content-Length: " . filesize($fullfilepath));
 
 		// Send file
-		readfile(LYCHEE_UPLOADS_BIG . $photo->url);
+		readfile($fullfilepath);
 
 		// Call plugins
 		Plugins::get()->activate(__METHOD__, 1, func_get_args());
 
 		return true;
-
 	}
 
 	/**
@@ -987,6 +1262,48 @@ final class Photo {
 
 		// Set description
 		$query  = Database::prepare(Database::get(), "UPDATE ? SET description = '?' WHERE id IN ('?')", array(LYCHEE_TABLE_PHOTOS, $description, $this->photoIDs));
+		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+
+		// Call plugins
+		Plugins::get()->activate(__METHOD__, 1, func_get_args());
+
+		if ($result===false) return false;
+		return true;
+
+	}
+
+	/**
+	 * Sets the license of a photo.
+	 * @return boolean Returns true when successful.
+	 */
+	public function setLicense($license) {
+
+		// Check dependencies
+		Validator::required(isset($this->photoIDs), __METHOD__);
+
+		// Call plugins
+		Plugins::get()->activate(__METHOD__, 0, func_get_args());
+
+		// Validate the license submitted
+		$licenses = ['none', 'reserved', 'CC0', 'CC-BY', 'CC-BY-ND', 'CC-BY-SA', 'CC-BY-NC', 'CC-BY-NC-ND', 'CC-BY-NC-SA' ];
+
+		$found = false;
+		$i = 0;
+
+		while(!$found && $i < count($licenses))
+		{
+			if ($licenses[$i] == $license) $found = true;
+			$i++;
+		}
+		if(!$found)
+		{
+			// Log the error
+			Log::error(Database::get(), __METHOD__, __LINE__, 'Could not find specified license');
+			return false;
+		}
+
+		// Set description
+		$query  = Database::prepare(Database::get(), "UPDATE ? SET license = '?' WHERE id IN ('?')", array(LYCHEE_TABLE_PHOTOS, $license, $this->photoIDs));
 		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
 
 		// Call plugins
@@ -1152,9 +1469,20 @@ final class Photo {
 		// Call plugins
 		Plugins::get()->activate(__METHOD__, 0, func_get_args());
 
+		// Get current albums
+		$query  = Database::prepare(Database::get(), "SELECT album FROM ? WHERE id IN (?)", array(LYCHEE_TABLE_PHOTOS, $this->photoIDs));
+		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+		$albums = mysqli_fetch_array($result, MYSQLI_NUM);
+		array_push($albums, $albumID);
+
 		// Set album
 		$query  = Database::prepare(Database::get(), "UPDATE ? SET album = '?' WHERE id IN (?)", array(LYCHEE_TABLE_PHOTOS, $albumID, $this->photoIDs));
 		$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+
+		// Update albums takestamp info
+		$values = array(LYCHEE_TABLE_ALBUMS, LYCHEE_TABLE_PHOTOS, LYCHEE_TABLE_PHOTOS, implode(", ", $albums));
+		$query = Database::prepare(Database::get(), "UPDATE ? a SET a.min_takestamp = (SELECT IFNULL(min(takestamp), 0) FROM ? WHERE album = a.id), a.max_takestamp = (SELECT IFNULL(max(takestamp), 0) FROM ? WHERE album = a.id) WHERE a.id IN (?)", $values);
+		$result = $result && Database::execute(Database::get(), $query, __METHOD__, __LINE__);
 
 		// Call plugins
 		Plugins::get()->activate(__METHOD__, 1, func_get_args());
@@ -1224,7 +1552,7 @@ final class Photo {
 
 			// Duplicate entry
 			$values = array(LYCHEE_TABLE_PHOTOS, $id, LYCHEE_TABLE_PHOTOS, $photo->id);
-			$query  = Database::prepare(Database::get(), "INSERT INTO ? (id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, shutter, focal, takestamp, thumbUrl, album, public, star, checksum) SELECT '?' AS id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, shutter, focal, takestamp, thumbUrl, album, public, star, checksum FROM ? WHERE id = '?'", $values);
+			$query  = Database::prepare(Database::get(), "INSERT INTO ? (id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, lens, shutter, focal, takestamp, thumbUrl, album, public, star, checksum, medium, small, license) SELECT '?' AS id, title, url, description, tags, type, width, height, size, iso, aperture, make, model, lens, shutter, focal, takestamp, thumbUrl, album, public, star, checksum, medium, small, license FROM ? WHERE id = '?'", $values);
 			$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
 
 			if ($result===false) $error = true;
@@ -1252,8 +1580,9 @@ final class Photo {
 		$error = false;
 
 		// Get photos
-		$query  = Database::prepare(Database::get(), "SELECT id, url, thumbUrl, checksum FROM ? WHERE id IN (?)", array(LYCHEE_TABLE_PHOTOS, $this->photoIDs));
+		$query  = Database::prepare(Database::get(), "SELECT id, url, type, thumbUrl, checksum, album FROM ? WHERE id IN (?)", array(LYCHEE_TABLE_PHOTOS, $this->photoIDs));
 		$photos = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+		$albums = array();
 
 		if ($photos===false) return false;
 
@@ -1281,7 +1610,7 @@ final class Photo {
 				}
 
 				// Delete thumb
-				if (file_exists(LYCHEE_UPLOADS_THUMB . $photo->thumbUrl)&&!unlink(LYCHEE_UPLOADS_THUMB . $photo->thumbUrl)) {
+				if (file_exists(LYCHEE_UPLOADS_THUMB . $photo->thumbUrl) && !unlink(LYCHEE_UPLOADS_THUMB . $photo->thumbUrl)) {
 					Log::error(Database::get(), __METHOD__, __LINE__, 'Could not delete photo in uploads/thumb/');
 					$error = true;
 				}
@@ -1300,6 +1629,16 @@ final class Photo {
 
 			if ($result===false) $error = true;
 
+			array_push($albums, $photo->album);
+
+		}
+
+		// Update takestamp info of album
+		if (!empty($albums)) {
+			$query  = Database::prepare(Database::get(), "UPDATE ? a SET a.min_takestamp = (SELECT IFNULL(min(takestamp), 0) FROM ? WHERE album = a.id), a.max_takestamp = (SELECT IFNULL(max(takestamp), 0) FROM ? WHERE album = a.id) WHERE a.id IN (?)",
+										array(LYCHEE_TABLE_ALBUMS, LYCHEE_TABLE_PHOTOS, LYCHEE_TABLE_PHOTOS, implode(",", $albums)));
+			$result = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+			if ($result===false) $error = true;
 		}
 
 		// Call plugins
@@ -1311,5 +1650,3 @@ final class Photo {
 	}
 
 }
-
-?>

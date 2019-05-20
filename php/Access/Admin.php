@@ -10,6 +10,7 @@ use Lychee\Modules\Response;
 use Lychee\Modules\Session;
 use Lychee\Modules\Settings;
 use Lychee\Modules\Validator;
+use Lychee\Run\Small;
 
 final class Admin extends Access {
 
@@ -25,6 +26,7 @@ final class Admin extends Access {
 			case 'Album::add':              self::addAlbumAction(); break;
 			case 'Album::setTitle':         self::setAlbumTitleAction(); break;
 			case 'Album::setDescription':   self::setAlbumDescriptionAction(); break;
+			case 'Album::setLicense':		self::setAlbumLicenseAction(); break;
 			case 'Album::setPublic':        self::setAlbumPublicAction(); break;
 			case 'Album::setPosition':      self::setPositionAction(); break;
 			case 'Album::delete':           self::deleteAlbumAction(); break;
@@ -34,6 +36,7 @@ final class Admin extends Access {
 			case 'Photo::get':              self::getPhotoAction(); break;
 			case 'Photo::setTitle':         self::setPhotoTitleAction(); break;
 			case 'Photo::setDescription':   self::setPhotoDescriptionAction(); break;
+			case 'Photo::setLicense':				self::setPhotoLicenseAction(); break;
 			case 'Photo::setStar':          self::setPhotoStarAction(); break;
 			case 'Photo::setPublic':        self::setPhotoPublicAction(); break;
 			case 'Photo::setAlbum':         self::setPhotoAlbumAction(); break;
@@ -55,14 +58,24 @@ final class Admin extends Access {
 			case 'Session::logout':         self::logoutAction(); break;
 
 			// Settings functions
+			case 'Settings::setImageOverlay':     self::setImageOverlay(); break;
+			case 'Settings::setOverlayType':	  self::setOverlayType(); break;
+			case 'Settings::setLayout':     self::setLayoutAction(); break;
+			case 'Settings::setLang':      	self::setLangAction(); break;
+			case 'Settings::setDefaultLicense':	  self::setDefaultLicenseAction(); break;
 			case 'Settings::setLogin':      self::setLoginAction(); break;
 			case 'Settings::setSorting':    self::setSortingAction(); break;
 			case 'Settings::setDropboxKey': self::setDropboxKeyAction(); break;
+			case 'Settings::setCSS': 		self::setCSS(); break;
+			case 'Settings::getAll': 		self::getAll(); break;
+			case 'Settings::saveAll': 		self::saveAll(); break;
+			case 'phpinfo':					phpinfo(); exit;
 
 			// $_GET functions
 			case 'Album::getArchive':       self::getAlbumArchiveAction(); break;
 			case 'Photo::getArchive':       self::getPhotoArchiveAction(); break;
 
+			case 'Photo::genSmall':			self::genSmall(); break;
 		}
 
 		self::fnNotFound();
@@ -177,6 +190,15 @@ final class Admin extends Access {
 
 		$photo = new Photo($_POST['photoID']);
 		Response::json($photo->setDescription($_POST['description']));
+
+	}
+
+	private static function setPhotoLicenseAction() {
+
+		Validator::required(isset($_POST['photoID'], $_POST['license']), __METHOD__);
+
+		$photo = new Photo($_POST['photoID']);
+		Response::json($photo->setLicense($_POST['license']));
 
 	}
 
@@ -309,6 +331,41 @@ final class Admin extends Access {
 
 	}
 
+	private static function setLangAction() {
+
+		Validator::required(isset($_POST['lang']), __METHOD__);
+
+		Response::json(Settings::setLang($_POST['lang']));
+	}
+
+	private static function setDefaultLicenseAction() {
+
+		Validator::required(isset($_POST['license']), __METHOD__);
+
+		Response::json(Settings::setDefaultLicense($_POST['license']));
+	}
+
+	private static function setLayoutAction() {
+
+		Validator::required(isset($_POST['layout']), __METHOD__);
+
+		Response::json(Settings::setLayout($_POST['layout']));
+	}
+
+	private static function setImageOverlay() {
+
+		Validator::required(isset($_POST['image_overlay']), __METHOD__);
+
+		Response::json(Settings::setImageOverlay($_POST['image_overlay']));
+	}
+
+	private static function setOverlayType() {
+
+		Validator::required(isset($_POST['image_overlay_type']), __METHOD__);
+
+		Response::json(Settings::setOverlayType($_POST['image_overlay_type']));
+	}
+
 	private static function setSortingAction() {
 
 		Validator::required(isset($_POST['typeAlbums'], $_POST['orderAlbums'], $_POST['typePhotos'], $_POST['orderPhotos']), __METHOD__);
@@ -345,10 +402,37 @@ final class Admin extends Access {
 		Validator::required(isset($_GET['photoID']), __METHOD__);
 
 		$photo = new Photo($_GET['photoID']);
-		$photo->getArchive();
+		$kind = isset($_GET['kind']) ? $_GET['kind'] : 'FULL';
+		$photo->getArchive($kind);
+
+	}
+
+	private static function genSmall() {
+
+		$nb = isset($_GET['nb']) ? $_GET['nb'] : 5;
+		$from = isset($_GET['from']) ? $_GET['from'] : 0;
+		$timeout = isset($_GET['timeout']) ? $_GET['timeout'] : 1000;
+		Small::run($nb, $from, $timeout);
+
+	}
+
+	private static function setCSS() {
+
+		echo (Settings::setCSS($_POST['css']) ? 'true' : 'false');
+		exit();
+	}
+
+	private static function getAll() {
+
+		return Response::json(Settings::getAll());
+
+	}
+
+	private static function saveAll() {
+
+		echo (Settings::saveAll() ? 'true' : 'false');
+		exit();
 
 	}
 
 }
-
-?>

@@ -2,6 +2,8 @@
 
 namespace Lychee\Modules;
 
+use Lychee\Locale\Lang;
+
 final class Settings {
 
 	private static $cache = null;
@@ -20,14 +22,55 @@ final class Settings {
 		// Add each to return
 		while ($setting = $settings->fetch_object()) $return[$setting->key] = $setting->value;
 
+		$return['imagick'] = (extension_loaded('imagick') && $return['imagick'] == '1') ? '1' : '0';
 		// Convert plugins to array
 		$return['plugins'] = explode(';', $return['plugins']);
+
+		$return['lang_available'] = Lang::get_lang_available();
 
 		self::$cache = $return;
 
 		return $return;
 
 	}
+
+	/**
+	 * @return array Returns the settings of Lychee.
+	 */
+	public static function getAll() {
+
+		// Execute query
+		$query    = Database::prepare(Database::get(), "SELECT * FROM ?", array(LYCHEE_TABLE_SETTINGS));
+		$settings = Database::execute(Database::get(), $query, __METHOD__, __LINE__);
+
+		// Add each to return
+		$return = array();
+		// while ($setting = $settings->fetch_object()) $return[$setting->key] = $setting->value;
+		while($setting = $settings->fetch_array())
+		{
+		$return[] = $setting;
+		}
+
+		return $return;
+
+	}
+
+
+	public static function saveAll() {
+
+		$no_error = true;
+		foreach ($_POST as $key => $value) {
+			if($key != 'function')
+			{
+				$no_error &= self::set($key,$value);
+			}
+		}
+
+		return $no_error;
+
+	}
+
+
 
 	/**
 	 * @return boolean Returns true when successful.
@@ -56,15 +99,22 @@ final class Settings {
 
 	}
 
+
+	public function setCSS($css)
+	{
+		file_put_contents(__DIR__ . '/../../dist/user.css',$css);
+		return true;
+	}
+
+
 	/**
 	 * Sets the username and password when current password is correct.
 	 * Exits on error.
 	 * @return true Returns true when successful.
 	 */
-	public static function setLogin($oldPassword = '', $username, $password) {
+	public static function setLogin($oldPassword, $username, $password) {
 
-		if ($oldPassword===self::get()['password']||self::get()['password']===crypt($oldPassword, self::get()['password'])) {
-
+		if ((self::get()['password'] === '') or password_verify($oldPassword, self::get()['password'])) {
 			// Save username
 			if (self::setUsername($username)===false) Response::error('Updating username failed!');
 
@@ -72,7 +122,6 @@ final class Settings {
 			if (self::setPassword($password)===false) Response::error('Updating password failed!');
 
 			return true;
-
 		}
 
 		Response::error('Current password entered incorrectly!');
@@ -132,6 +181,54 @@ final class Settings {
 		if (self::set('dropboxKey', $dropboxKey)===false) return false;
 		return true;
 
+	}
+
+	public static function setLang($lang) {
+		$lang_available = Lang::get_lang_available();
+		for ($i = 0; $i < count($lang_available); $i++)
+		{
+			if($lang == $lang_available[$i])
+			{
+				if (self::set('lang', $lang, true)===false) return false;
+				return true;
+			}
+		}
+		Log::error(Database::get(), __METHOD__, __LINE__, 'Could not update settings. Unknown lang.');
+		return false;
+	}
+
+	public static function setLayout($layout) {
+		if ($layout == '0' || $layout == '1' || $layout == '2') {
+			return self::set('layout', $layout);
+		}
+		Log::error(Database::get(), __METHOD__, __LINE__, 'Could not update settings. Unknown layout.');
+		return false;
+	}
+
+	public static function setImageOverlay($imageOverlay) {
+		if (self::set('image_overlay', ($imageOverlay == '1') ? '1' : '0', true)===false) return false;
+		return true;
+	}
+
+	public static function setOverlayType($imageOverlayType) {
+		$overlays = [ 'exif', 'desc', 'takedate' ];
+
+		$found = false;
+		$i = 0;
+
+		while(!$found && $i < count($overlays)) {
+			if ($overlays[$i] === $imageOverlayType) $found = true;
+			$i++;
+		}
+
+		if(!$found) {
+			Log::error(Database::get(), __METHOD__, __LINE__, 'Cound not find the submitted overlay type');
+			Response::error(Database::get(), __METHOD__, __LINE__, 'Cound not find the submitted overlay type');
+		}
+		else {
+			if (self::set('image_overlay_type', $imageOverlayType, true)===false) return false;
+			return true;
+		}
 	}
 
 	/**
@@ -194,6 +291,8 @@ final class Settings {
 			case 'title':       $sorting .= 'title'; break;
 			case 'description': $sorting .= 'description'; break;
 			case 'public':      $sorting .= 'public'; break;
+			case 'min_takestamp':   $sorting .= 'min_takestamp'; break;
+			case 'max_takestamp':   $sorting .= 'max_takestamp'; break;
 			default:            Log::error(Database::get(), __METHOD__, __LINE__, 'Could not update settings. Unknown type for sorting.');
 			                    return false;
 			                    break;
@@ -228,6 +327,42 @@ final class Settings {
 		return (bool)(extension_loaded('imagick') && self::get()['imagick'] === '1');
 	}
 
-}
+	/**
+	 * @return boolean Boolean for successful default setting
+	 */
+	public static function setDefaultLicense($license) {
+		$licenses = ['none', 'reserved', 'CC0', 'CC-BY', 'CC-BY-ND', 'CC-BY-SA', 'CC-BY-NC', 'CC-BY-NC-ND', 'CC-BY-NC-SA' ];
 
-?>
+		$found = false;
+		$i = 0;
+
+		while(!$found && $i < count($licenses)) {
+			if ($licenses[$i] === $license) $found = true;
+			$i++;
+		}
+
+		if(!$found) {
+			Log::error(Database::get(), __METHOD__, __LINE__, 'Cound not find the submitted license');
+		}
+		else {
+			if (self::set('default_license', $license, true)===false) return false;
+			return true;
+		}
+		Log::error(Database::get(), __METHOD__, __LINE__, 'Could not update settings. Unknown license.');
+		return false;
+	}
+
+	/**
+	* @return bool Returns the useExiftool setting.
+	*/
+	public static function useExiftool() {
+	// of course this if statement can be optimized but we don't want that as we want to avoid any exec/system call
+		if(self::get()['useExiftool'] === '1')
+		{
+			exec('which exiftool 2>&1 > /dev/null', $output, $status);
+			if ($status != 0) return false;
+			return true;
+		}
+		return false;
+	}
+}

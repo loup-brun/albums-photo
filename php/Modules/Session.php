@@ -2,6 +2,8 @@
 
 namespace Lychee\Modules;
 
+use Lychee\Locale\Lang;
+
 final class Session {
 
 	/**
@@ -44,14 +46,30 @@ final class Session {
 
 			// Unset unused vars
 			unset($return['config']['skipDuplicates']);
-			unset($return['config']['sortingAlbums']);
-			unset($return['config']['sortingPhotos']);
 			unset($return['config']['dropboxKey']);
 			unset($return['config']['login']);
 			unset($return['config']['location']);
 			unset($return['config']['imagick']);
 			unset($return['config']['plugins']);
+			unset($return['config']['php_script_limit']);
+			unset($return['config']['useExiftool']);
 
+		}
+
+		$return['locale'] = Lang::get_lang(Settings::get()['lang']);
+
+		$return['update_json'] = 0;
+		$return['update_available'] = false;
+		if($return['config']['checkForUpdates'] == '1')
+		{
+			try {
+				$json = file_get_contents('https://lycheeorg.github.io/update.json');
+				$obj = json_decode($json);
+				$return['update_json'] = $obj->lychee->version;
+				$return['update_available'] = ((intval(substr($return['config']['version'],8))) < $return['update_json']);
+			} catch (\Exception $e) {
+				Log::notice(Database::get(), __METHOD__, __LINE__, 'Could not access: https://lycheeorg.github.io/update.json');
+			}
 		}
 
 		// Call plugins
@@ -70,16 +88,11 @@ final class Session {
 		// Call plugins
 		Plugins::get()->activate(__METHOD__, 0, func_get_args());
 
-		$username_crypt = crypt($username, Settings::get()['username']);
-		$password_crypt = crypt($password, Settings::get()['password']);
-
-		// Check login with crypted hash
-		if (Settings::get()['username']===$username_crypt&&
-			Settings::get()['password']===$password_crypt) {
-				$_SESSION['login']      = true;
-				$_SESSION['identifier'] = Settings::get()['identifier'];
-				Log::notice(Database::get(), __METHOD__, __LINE__, 'User (' . $username . ') has logged in from ' . $_SERVER['REMOTE_ADDR']);
-				return true;
+		if (password_verify($username, Settings::get()['username']) and password_verify($password, Settings::get()['password'])) {
+			$_SESSION['login']      = true;
+			$_SESSION['identifier'] = Settings::get()['identifier'];
+			Log::notice(Database::get(), __METHOD__, __LINE__, 'User (' . $username . ') has logged in from ' . ($_SERVER['HTTP_X_REAL_IP'] ?? $_SERVER['REMOTE_ADDR']));
+			return true;
 		}
 
 		// No login
@@ -89,10 +102,9 @@ final class Session {
 		Plugins::get()->activate(__METHOD__, 1, func_get_args());
 
 		// Log failed log in
-		Log::error(Database::get(), __METHOD__, __LINE__, 'User (' . $username . ') has tried to log in from ' . $_SERVER['REMOTE_ADDR']);
+		Log::error(Database::get(), __METHOD__, __LINE__, 'User (' . $username . ') has tried to log in from ' . ($_SERVER['HTTP_X_REAL_IP'] ?? $_SERVER['REMOTE_ADDR']));
 
 		return false;
-
 	}
 
 	/**
@@ -133,5 +145,3 @@ final class Session {
 	}
 
 }
-
-?>
