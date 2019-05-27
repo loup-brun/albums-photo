@@ -3,9 +3,9 @@
 	<head>
 
 		<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
-		<title>Lychee</title>
+		<title>Louis-Olivier Brassard / Albums web</title>
 
-		<meta name="author" content="Tobias Reich">
+		<meta name="author" content="Louis-Olivier Brasard">
 
 		<!-- CSS -->
 		<link type="text/css" rel="stylesheet" href="dist/main.css">
